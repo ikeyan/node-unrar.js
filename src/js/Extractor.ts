@@ -1,9 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export type SeekMethod = 'CUR' | 'SET' | 'END';
 
+const ERAR_SUCCESS = 0;
+const ERAR_END_ARCHIVE = 10;
+
 const ERROR_CODE = {
-  0: 'ERAR_SUCCESS',
-  10: 'ERAR_END_ARCHIVE',
   11: 'ERAR_NO_MEMORY',
   12: 'ERAR_BAD_DATA',
   13: 'ERAR_BAD_ARCHIVE',
@@ -20,10 +21,7 @@ const ERROR_CODE = {
   24: 'ERAR_BAD_PASSWORD',
 } as const;
 
-export type FailReason = Exclude<
-  (typeof ERROR_CODE)[keyof typeof ERROR_CODE],
-  'ERAR_SUCCESS' | 'ERAR_END_ARCHIVE'
->;
+export type FailReason = (typeof ERROR_CODE)[keyof typeof ERROR_CODE];
 
 const ERROR_MSG: { [k in FailReason]: string } = {
   ERAR_NO_MEMORY: 'Not enough memory',
@@ -130,14 +128,9 @@ export abstract class Extractor<withContent = never> {
     const arcHeader = this.openArc(true);
 
     function* getFileHeaders(this: Extractor<withContent>): Generator<FileHeader> {
-      while (true) {
-        const arcFile = this.processNextFile(() => true);
-        if (arcFile === 'ERAR_END_ARCHIVE') {
-          break;
-        }
+      for (const arcFile of this.enumerateFiles(() => true)) {
         yield arcFile.fileHeader;
       }
-      this.closeArc();
     }
 
     return { arcHeader, fileHeaders: getFileHeaders.call(this) };
@@ -146,30 +139,27 @@ export abstract class Extractor<withContent = never> {
   public extract({ files, password }: ExtractOptions = {}): ArcFiles<withContent> {
     const arcHeader = this.openArc(false, password);
     function* getFiles(this: Extractor<withContent>): Generator<ArcFile<withContent>> {
+      let shouldSkip: (fileHeader: FileHeader) => boolean = () => false;
+      let maxCount = Infinity;
+      if (Array.isArray(files)) {
+        shouldSkip = ({ name }: FileHeader) => !files.includes(name);
+        maxCount = files.length;
+      } else if (files) {
+        shouldSkip = (fileHeader) => !files(fileHeader);
+      }
       let count = 0;
-      while (true) {
-        let shouldSkip: (fileHeader: FileHeader) => boolean = () => false;
-        if (Array.isArray(files)) {
-          if (count === files.length) {
-            break;
-          }
-          shouldSkip = ({ name }: FileHeader) => !files.includes(name);
-        } else if (files) {
-          shouldSkip = (fileHeader) => !files(fileHeader);
-        }
-        const arcFile = this.processNextFile(shouldSkip);
-        if (arcFile === 'ERAR_END_ARCHIVE') {
-          break;
-        }
+      for (const arcFile of this.enumerateFiles(shouldSkip)) {
         if (arcFile.extraction === 'skipped') {
           continue;
         }
         count++;
         yield {
           fileHeader: arcFile.fileHeader,
-        } as ArcFile<withContent>;
+        } satisfies ArcFile<withContent>;
+        if (count >= maxCount) {
+          break;
+        }
       }
-      this.closeArc();
     }
     return { arcHeader, files: getFiles.call(this) };
   }
@@ -192,12 +182,9 @@ export abstract class Extractor<withContent = never> {
 
   private openArc(listOnly: boolean, password?: string): ArcHeader {
     this._archive = new this.unrar.RarArchive();
-    const header = this._archive.open(
-      this._filePath,
-      password ? password : this._password,
-      listOnly,
-    );
-    if (header.state.errCode !== 0) {
+    const header = this._archive.open(this._filePath, password || this._password, listOnly);
+    if (header.state.errCode !== ERAR_SUCCESS) {
+      this.closeArc();
       throw this.getFailException(header.state.errCode, header.state.errType);
     }
     return {
@@ -213,9 +200,9 @@ export abstract class Extractor<withContent = never> {
     };
   }
 
-  private processNextFile(
+  private *enumerateFiles(
     shouldSkip: (fileHeader: FileHeader) => boolean,
-  ): ArcFile<'skipped' | 'extracted'> | 'ERAR_END_ARCHIVE' {
+  ): Generator<ArcFile<'skipped' | 'extracted'>> {
     function getDateString(dosTime: number): string {
       const bitLen = [5, 6, 5, 5, 4, 7];
       let parts: number[] = [];
@@ -244,43 +231,49 @@ export abstract class Extractor<withContent = never> {
       return methodMap[method] || 'Unknown';
     }
 
-    const arcFileHeader = this._archive.getFileHeader();
+    try {
+      while (true) {
+        const arcFileHeader = this._archive.getFileHeader();
 
-    if (arcFileHeader.state.errCode === 10) {
-      return 'ERAR_END_ARCHIVE';
+        if (arcFileHeader.state.errCode === ERAR_END_ARCHIVE) {
+          break;
+        }
+
+        if (arcFileHeader.state.errCode !== ERAR_SUCCESS) {
+          throw this.getFailException(arcFileHeader.state.errCode, arcFileHeader.state.errType);
+        }
+
+        const fileHeader: FileHeader = {
+          name: arcFileHeader.name,
+          flags: {
+            encrypted: (arcFileHeader.flags & 0x04) !== 0,
+            solid: (arcFileHeader.flags & 0x10) !== 0,
+            directory: (arcFileHeader.flags & 0x20) !== 0,
+          },
+          packSize: arcFileHeader.packSize,
+          unpSize: arcFileHeader.unpSize,
+          // hostOS: arcFileHeader.hostOS
+          crc: arcFileHeader.crc,
+          time: getDateString(arcFileHeader.time),
+          unpVer: `${Math.floor(arcFileHeader.unpVer / 10)}.${arcFileHeader.unpVer % 10}`,
+          method: getMethod(arcFileHeader.method),
+          comment: arcFileHeader.comment,
+          // // fileAttr: arcFileHeader.fileAttr,
+        };
+
+        const skip = shouldSkip(fileHeader);
+        const fileState = this._archive.readFile(skip);
+        if (fileState.errCode !== ERAR_SUCCESS) {
+          throw this.getFailException(fileState.errCode, fileState.errType, fileHeader.name);
+        }
+        yield {
+          fileHeader,
+          extraction: skip ? 'skipped' : 'extracted',
+        };
+      }
+    } finally {
+      this.closeArc();
     }
-
-    if (arcFileHeader.state.errCode !== 0) {
-      throw this.getFailException(arcFileHeader.state.errCode, arcFileHeader.state.errType);
-    }
-
-    const fileHeader: FileHeader = {
-      name: arcFileHeader.name,
-      flags: {
-        encrypted: (arcFileHeader.flags & 0x04) !== 0,
-        solid: (arcFileHeader.flags & 0x10) !== 0,
-        directory: (arcFileHeader.flags & 0x20) !== 0,
-      },
-      packSize: arcFileHeader.packSize,
-      unpSize: arcFileHeader.unpSize,
-      // hostOS: arcFileHeader.hostOS
-      crc: arcFileHeader.crc,
-      time: getDateString(arcFileHeader.time),
-      unpVer: `${Math.floor(arcFileHeader.unpVer / 10)}.${arcFileHeader.unpVer % 10}`,
-      method: getMethod(arcFileHeader.method),
-      comment: arcFileHeader.comment,
-      // // fileAttr: arcFileHeader.fileAttr,
-    };
-
-    const skip = shouldSkip(fileHeader);
-    const fileState = this._archive.readFile(skip);
-    if (fileState.errCode !== 0) {
-      throw this.getFailException(fileState.errCode, fileState.errType, fileHeader.name);
-    }
-    return {
-      fileHeader,
-      extraction: skip ? 'skipped' : 'extracted',
-    };
   }
 
   private closeArc(): void {
@@ -288,13 +281,8 @@ export abstract class Extractor<withContent = never> {
     this._archive = null;
   }
 
-  private getFailException(
-    errCode: Exclude<keyof typeof ERROR_CODE, 0 | 10>,
-    _errType: string,
-    file?: string,
-  ) {
+  private getFailException(errCode: keyof typeof ERROR_CODE, _errType: string, file?: string) {
     const reason = ERROR_CODE[errCode];
-    this.closeArc();
     return new UnrarError(reason, ERROR_MSG[reason], file);
   }
 }
