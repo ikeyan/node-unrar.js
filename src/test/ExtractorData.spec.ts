@@ -10,10 +10,18 @@ function getExtractor(fileName: string, password?: string) {
   return unrar.createExtractorFromData({ data: arrBuf, password });
 }
 
+function getArchive(extractor: object) {
+  if ('_archive' in extractor) {
+    return extractor._archive;
+  }
+  throw new Error('Extractor does not have _archive property');
+}
+
 describe('Data Test', () => {
   it('Archive Comment', async () => {
     const extractor = await getExtractor('WithComment.rar');
     const { arcHeader, fileHeaders } = extractor.getFileList();
+    assert.strictEqual(!!getArchive(extractor), true);
     assert.deepStrictEqual(arcHeader, {
       comment:
         'Test Comments for rar files.\r\n\r\n测试一下中文注释。\r\n日本語のコメントもテストしていまし。',
@@ -61,6 +69,7 @@ describe('Data Test', () => {
         },
       ],
     );
+    assert.strictEqual(getArchive(extractor), null);
   });
 
   it('Header encryption', async () => {
@@ -73,11 +82,13 @@ describe('Data Test', () => {
       assert.deepStrictEqual(err.reason, 'ERAR_MISSING_PASSWORD');
       return true;
     });
+    assert.strictEqual(getArchive(extractor), null);
   });
 
   it('File encrypted with different passwords', async () => {
     const extractor = await getExtractor('FileEncByName.rar');
     const { arcHeader, fileHeaders } = extractor.getFileList();
+    assert.strictEqual(!!getArchive(extractor), true);
     assert.deepStrictEqual(arcHeader, {
       comment: '',
       flags: {
@@ -139,11 +150,13 @@ describe('Data Test', () => {
         },
       ],
     );
+    assert.strictEqual(getArchive(extractor), null);
   });
 
   it('Header encryption with password', async () => {
     const extractor = await getExtractor('HeaderEnc1234.rar', '1234');
     const { arcHeader, fileHeaders } = extractor.getFileList();
+    assert.strictEqual(!!getArchive(extractor), true);
     assert.deepStrictEqual(arcHeader, {
       comment: 'Hello, world',
       flags: {
@@ -190,11 +203,13 @@ describe('Data Test', () => {
         },
       ],
     );
+    assert.strictEqual(getArchive(extractor), null);
   });
 
   it('Extract Header encryption file', async () => {
     const extractor = await getExtractor('HeaderEnc1234.rar', '1234');
     const { arcHeader, files } = extractor.extract();
+    assert.strictEqual(!!getArchive(extractor), true);
     assert.deepStrictEqual(arcHeader, {
       comment: 'Hello, world',
       flags: {
@@ -207,6 +222,7 @@ describe('Data Test', () => {
       },
     });
     const list = [...files];
+    assert.strictEqual(getArchive(extractor), null);
     assert.deepStrictEqual(
       list.map(({ fileHeader }) => fileHeader),
       [
@@ -251,7 +267,9 @@ describe('Data Test', () => {
   it('Extract Files by callback', async () => {
     const extractor = await getExtractor('FileEncByName.rar');
     const { files } = extractor.extract({ files: (fileHeader) => !fileHeader.flags.encrypted });
+    assert.strictEqual(!!getArchive(extractor), true);
     const list = [...files];
+    assert.strictEqual(getArchive(extractor), null);
 
     assert.deepStrictEqual(list, [
       {
@@ -278,8 +296,10 @@ describe('Data Test', () => {
   it('Extract File encrypted with different passwords (no password)', async () => {
     const extractor = await getExtractor('FileEncByName.rar');
     const { files } = extractor.extract();
+    assert.strictEqual(!!getArchive(extractor), true);
 
     const { value: file0 } = files.next() as IteratorResult<ArcFile<Uint8Array>, never>;
+    assert.strictEqual(!!getArchive(extractor), true);
 
     assert.deepStrictEqual(Buffer.from(file0.extraction!).toString('utf8'), '1File');
 
@@ -294,13 +314,16 @@ describe('Data Test', () => {
         return true;
       },
     );
+    assert.strictEqual(getArchive(extractor), null);
   });
 
   it('Extract File encrypted with different passwords (multiple passwords)', async () => {
     const extractor = await getExtractor('FileEncByName.rar', '1234');
     let { files } = extractor.extract({ files: ['2中文.txt', '1File.txt'], password: '2中文' });
+    assert.strictEqual(!!getArchive(extractor), true);
 
     let list = [...files];
+    assert.strictEqual(getArchive(extractor), null);
     assert.deepStrictEqual(list.length, 2);
 
     assert.strictEqual(Buffer.from(list[0].extraction!).toString('utf-8'), '1File');
@@ -308,15 +331,19 @@ describe('Data Test', () => {
     assert.strictEqual(Buffer.from(list[1].extraction!.subarray(3)).toString('utf-8'), '中文中文');
 
     files = extractor.extract({ files: ['3Sec.txt'], password: '3Sec' }).files;
+    assert.strictEqual(!!getArchive(extractor), true);
     list = [...files];
+    assert.strictEqual(getArchive(extractor), null);
     assert.strictEqual(Buffer.from(list[0].extraction!).toString('utf-8'), '3Secc');
   });
 
   it('Extract File with folders', async () => {
     const extractor = await getExtractor('FolderTest.rar');
     const { files } = extractor.extract();
+    assert.strictEqual(!!getArchive(extractor), true);
 
     const list = [...files];
+    assert.strictEqual(getArchive(extractor), null);
 
     assert.deepStrictEqual(
       list.map(({ fileHeader }) => fileHeader),
